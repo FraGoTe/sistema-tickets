@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+parameters.json
+stack-outputs.json
+ssm-command.json
+ssm-result.json
+application.zip
+web/config.js
+deploy/service.env

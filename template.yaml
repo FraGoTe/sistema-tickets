@@ -1,0 +1,295 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EC2 core para tickets. Laboratorio con origen HTTP restringido y datos ficticios.
+Parameters:
+  LatestAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  CloudFrontPrefixListId:
+    Type: String
+    AllowedPattern: 'pl-[a-z0-9]+'
+  OriginSecret:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '[A-Za-z0-9_-]{40,80}'
+Conditions:
+  IsUsEast1: !Equals [!Ref 'AWS::Region', us-east-1]
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: tickets-ec2-lab}]
+  Gateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Gateway
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.1.0/24
+      MapPublicIpOnLaunch: false
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+  InternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Gateway
+  SubnetRoute:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTP solo desde CloudFront. Administracion por SSM, sin SSH.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+  Artifacts:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+  ArtifactPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Artifacts
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource: [!GetAtt Artifacts.Arn, !Sub '${Artifacts.Arn}/*']
+            Condition:
+              Bool: {aws:SecureTransport: 'false'}
+  Tickets:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PROVISIONED
+      TableClass: STANDARD
+      AttributeDefinitions:
+        - {AttributeName: PK, AttributeType: S}
+        - {AttributeName: SK, AttributeType: S}
+      KeySchema:
+        - {AttributeName: PK, KeyType: HASH}
+        - {AttributeName: SK, KeyType: RANGE}
+      ProvisionedThroughput: {ReadCapacityUnits: 5, WriteCapacityUnits: 5}
+      SSESpecification: {SSEEnabled: true}
+      Tags: [{Key: Proyecto, Value: TicketsEC2}, {Key: Ambiente, Value: Lab}]
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Policies:
+        - PolicyName: ApplicationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:Query, dynamodb:UpdateItem]
+                Resource: !GetAtt Tickets.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${Artifacts.Arn}/application.zip'
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+  Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: [InternetRoute, SubnetRoute]
+    Properties:
+      ImageId: !Ref LatestAmi
+      InstanceType: t3.micro
+      CreditSpecification: {CPUCredits: standard}
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref Subnet
+      SecurityGroupIds: [!Ref SecurityGroup]
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags: [{Key: Name, Value: tickets-ec2-core}, {Key: Ambiente, Value: Lab}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eu
+          install -d -m 700 /etc/tickets
+          umask 077
+          printf '%s' '${OriginSecret}' > /etc/tickets/origin-secret
+          systemctl enable --now amazon-ssm-agent
+  OriginIp:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags: [{Key: Proyecto, Value: TicketsEC2}]
+  OriginIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt OriginIp.AllocationId
+      InstanceId: !Ref Instance
+  NoCache:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-${AWS::AccountId}-no-cache'
+        DefaultTTL: 0
+        MinTTL: 0
+        MaxTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: false
+          EnableAcceptEncodingBrotli: false
+          HeadersConfig: {HeaderBehavior: none}
+          CookiesConfig: {CookieBehavior: none}
+          QueryStringsConfig: {QueryStringBehavior: none}
+  ForwardViewer:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub '${AWS::StackName}-${AWS::AccountId}-viewer'
+        HeadersConfig: {HeaderBehavior: allViewer}
+        CookiesConfig: {CookieBehavior: all}
+        QueryStringsConfig: {QueryStringBehavior: all}
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: OriginIpAssociation
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        ViewerCertificate: {CloudFrontDefaultCertificate: true}
+        Origins:
+          - Id: ec2-core
+            # Derivar el nombre IPv4 de la EIP evita depender de atributos
+            # anteriores a su asociación con la instancia.
+            DomainName: !If
+              - IsUsEast1
+              - !Sub
+                - 'ec2-${DashedIp}.compute-1.amazonaws.com'
+                - DashedIp: !Join ['-', !Split ['.', !Ref OriginIp]]
+              - !Sub
+                - 'ec2-${DashedIp}.${AWS::Region}.compute.amazonaws.com'
+                - DashedIp: !Join ['-', !Split ['.', !Ref OriginIp]]
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+            OriginCustomHeaders:
+              - HeaderName: X-Origin-Verify
+                HeaderValue: !Ref OriginSecret
+        DefaultCacheBehavior:
+          TargetOriginId: ec2-core
+          ViewerProtocolPolicy: https-only
+          AllowedMethods: [GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: !Ref NoCache
+          OriginRequestPolicyId: !Ref ForwardViewer
+          Compress: true
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AWS::StackName}-users'
+      UserPoolTier: LITE
+      DeletionProtection: INACTIVE
+      MfaConfiguration: 'OFF'
+      AdminCreateUserConfig: {AllowAdminCreateUserOnly: true}
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+  ResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref UserPool
+      Identifier: tickets-api
+      Name: API de tickets
+      Scopes: [{ScopeName: access, ScopeDescription: Acceso a tickets propios}]
+  UserClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: ResourceServer
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: tickets-ec2-web
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      SupportedIdentityProviders: [COGNITO]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, tickets-api/access]
+      CallbackURLs: [!Sub 'https://${Distribution.DomainName}/']
+      LogoutURLs: [!Sub 'https://${Distribution.DomainName}/']
+      AccessTokenValidity: 15
+      IdTokenValidity: 15
+      RefreshTokenValidity: 1
+      TokenValidityUnits: {AccessToken: minutes, IdToken: minutes, RefreshToken: days}
+  UserDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Sub '${AWS::StackName}-${AWS::AccountId}'
+      ManagedLoginVersion: 1
+Outputs:
+  WebsiteUrl:
+    Value: !Sub 'https://${Distribution.DomainName}/'
+  ApiUrl:
+    Value: !Sub 'https://${Distribution.DomainName}/api'
+  BucketName:
+    Value: !Ref Artifacts
+  InstanceId:
+    Value: !Ref Instance
+  PublicIp:
+    Value: !Ref OriginIp
+  DistributionId:
+    Value: !Ref Distribution
+  UserPoolId:
+    Value: !Ref UserPool
+  Issuer:
+    Value: !Sub 'https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${UserPool}'
+  ClientId:
+    Value: !Ref UserClient
+  CognitoDomain:
+    Value: !Sub 'https://${UserDomain}.auth.${AWS::Region}.amazoncognito.com'
+  TableName:
+    Value: !Ref Tickets

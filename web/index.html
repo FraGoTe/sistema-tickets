@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Centro Aprende · Tickets</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="config.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Tickets de soporte</h1>
+    <p>Centro Aprende · Laboratorio AWS con EC2</p>
+    <button id="login" type="button">Iniciar sesión</button>
+    <button id="logout" type="button" hidden>Cerrar sesión</button>
+  </header>
+  <p id="message" role="status" aria-live="polite">Inicie sesión para gestionar sus tickets.</p>
+  <main id="workspace" hidden>
+    <section>
+      <h2>Nuevo ticket</h2>
+      <form id="create-form">
+        <label>Título <input name="titulo" required minlength="5" maxlength="100"></label>
+        <label>Descripción <textarea name="descripcion" required minlength="10" maxlength="1000"></textarea></label>
+        <label>Prioridad <select name="prioridad"><option>BAJA</option><option selected>MEDIA</option><option>ALTA</option></select></label>
+        <button id="create" type="submit">Crear ticket</button>
+      </form>
+    </section>
+    <section>
+      <h2>Mis tickets</h2>
+      <button id="reload" type="button">Volver a la primera página</button>
+      <ul id="tickets"></ul>
+      <button id="next" type="button" hidden>Siguiente página</button>
+    </section>
+    <section id="detail" hidden>
+      <h2>Detalle del ticket</h2>
+      <dl id="fields"></dl>
+      <button id="advance" type="button" hidden></button>
+    </section>
+  </main>
+  <footer>Use datos ficticios. Los tokens permanecen en memoria y la sesión local termina al recargar.</footer>
+</body>
+</html>

@@ -1,0 +1,24 @@
+[Unit]
+Description=API de tickets en EC2 con Gunicorn
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=tickets
+Group=tickets
+WorkingDirectory=/opt/tickets/backend
+EnvironmentFile=/etc/tickets.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/tickets/venv/bin/gunicorn --bind 127.0.0.1:8000 --workers 1 --threads 2 --timeout 30 --error-logfile - app:app
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
